@@ -1,6 +1,7 @@
 import math
 import random
 import time
+import threading
 
 import cv2
 from shapely import LineString
@@ -8,6 +9,7 @@ from shapely.geometry import Polygon
 from state_finder.main import get_state
 from detect import Detect
 from utils import load_toml_as_dict, count_hsv_pixels, load_brawlers_info
+import overlay
 
 brawl_stars_width, brawl_stars_height = 1920, 1080
 
@@ -170,6 +172,12 @@ class Play(Movement):
         }
         self.time_since_last_proceeding = time.time()
 
+        # ── Async tile detector thread ────────────────────────────────────────
+        self._tile_lock      = threading.Lock()
+        self._tile_pending   = False
+        self._tile_frame_buf = None
+        self._start_tile_thread()
+
         self.last_movement = ''
         self.last_movement_time = time.time()
         self.wall_history = []
@@ -221,21 +229,18 @@ class Play(Movement):
 
     def no_enemy_movement(self, player_data, walls):
         player_position = self.get_player_pos(player_data)
-        preferred_movement = 'W' if self.game_mode == 3 else 'D'  # Adjust based on game mode
-
+        preferred_movement = 'W' if self.game_mode == 3 else 'D'
         if not self.is_path_blocked(player_position, preferred_movement, walls):
             return preferred_movement
-        else:
-            # Try alternative movements
-            alternative_moves = ['W', 'A', 'S', 'D']
-            alternative_moves.remove(preferred_movement)
-            random.shuffle(alternative_moves)
-            for move in alternative_moves:
-                if not self.is_path_blocked(player_position, move, walls):
-                    return move
-            print("no movement possible ?")
-            # If no movement is possible, return empty string
-            return preferred_movement
+        cardinals = ['W', 'A', 'S', 'D']
+        cardinals.remove(preferred_movement)
+        random.shuffle(cardinals)
+        diagonals = ['WA', 'WD', 'SA', 'SD']
+        random.shuffle(diagonals)
+        for move in cardinals + diagonals:
+            if not self.is_path_blocked(player_position, move, walls):
+                return move
+        return preferred_movement  # fallback: ignore walls to avoid freezing
 
     def is_enemy_hittable(self, player_pos, enemy_pos, walls, skill_type):
         if self.can_attack_through_walls(self.current_brawler, skill_type, self.brawlers_info):
@@ -268,6 +273,34 @@ class Play(Movement):
 
         return None, None
 
+    def _start_tile_thread(self):
+        t = threading.Thread(target=self._tile_worker, daemon=True, name="TileDetector")
+        t.start()
+
+    def _tile_worker(self):
+        """Background thread: detects walls without blocking the main loop."""
+        while True:
+            frame = None
+            while frame is None:
+                with self._tile_lock:
+                    if self._tile_pending and self._tile_frame_buf is not None:
+                        frame = self._tile_frame_buf
+                        self._tile_pending = False
+                        self._tile_frame_buf = None
+                if frame is None:
+                    time.sleep(0.005)
+            try:
+                tile_data = self.Detect_tile_detector.detect_objects(
+                    frame, conf_tresh=self.wall_detection_confidence)
+                self.last_walls_data = self.process_tile_data(tile_data)
+            except Exception as e:
+                print(f"[TileDetector] {e}")
+
+    def _submit_tile(self, frame):
+        with self._tile_lock:
+            self._tile_frame_buf = frame
+            self._tile_pending = True
+
     def get_main_data(self, frame):
         data = self.Detect_main_info.detect_objects(frame, conf_tresh=self.entity_detection_confidence)
         return data
@@ -288,19 +321,23 @@ class Play(Movement):
         path_line = LineString([player_pos, new_pos])
         return self.walls_are_in_line_of_sight(path_line, walls)
 
-    @staticmethod
-    def validate_game_data(data):
-        incomplete = False
-        if "player" not in data.keys():
-            incomplete = True  # This is required so track_no_detections can also keep track if enemy is missing
-
-        if "enemy" not in data.keys():
+    def validate_game_data(self, data):
+        # Use last known player position for up to 1.5s if AI misses player
+        if "player" not in data or not data["player"]:
+            if hasattr(self, '_last_known_player') and self._last_known_player is not None:
+                if time.time() - self._last_known_player_time < 1.5:
+                    data["player"] = self._last_known_player
+                else:
+                    return False
+            else:
+                return False
+        self._last_known_player = data.get("player")
+        self._last_known_player_time = time.time()
+        if "enemy" not in data:
             data['enemy'] = None
-
-        if 'wall' not in data.keys() or not data['wall']:
+        if 'wall' not in data or not data['wall']:
             data['wall'] = []
-
-        return False if incomplete else data
+        return data
 
     def track_no_detections(self, data):
         if not data:
@@ -313,6 +350,8 @@ class Play(Movement):
                 self.time_since_detections[key] = time.time()
 
     def do_movement(self, movement):
+        if not movement:
+            return  # Never send empty movement - would stop the bot
         movement = movement.lower()
         keys_to_keyDown = []
         keys_to_keyUp = []
@@ -337,10 +376,9 @@ class Play(Movement):
     def loop(self, brawler, data, current_time):
         movement = self.get_movement(player_data=data['player'][0], enemy_data=data['enemy'], walls=data['wall'], brawler=brawler)
         current_time = time.time()
-        if current_time - self.time_since_movement > self.minimum_movement_delay:
-            movement = self.unstuck_movement_if_needed(movement, current_time)
-            self.do_movement(movement)
-            self.time_since_movement = time.time()
+        # Removed duplicate delay check - get_movement() handles minimum_movement_delay already
+        movement = self.unstuck_movement_if_needed(movement, current_time)
+        self.do_movement(movement)
         return movement
 
     def check_if_hypercharge_ready(self, frame):
@@ -390,7 +428,7 @@ class Play(Movement):
                 wall_key = tuple(wall)
                 wall_counts[wall_key] = wall_counts.get(wall_key, 0) + 1
 
-        threshold = 1
+        threshold = 2  # require 2 frames to avoid false positive walls
 
         combined_walls = [list(wall) for wall, count in wall_counts.items() if count >= threshold]
         # print(f"Combined walls: {combined_walls}")
@@ -434,18 +472,15 @@ class Play(Movement):
                 movement = move
                 break
         else:
-            print("default paths are blocked")
-            # If all preferred directions are blocked, try other directions
-            alternative_moves = ['W', 'A', 'S', 'D']
-            random.shuffle(alternative_moves)
-            for move in alternative_moves:
+            # All preferred directions blocked — try cardinals then diagonals
+            alt_moves = ['W', 'A', 'S', 'D', 'WA', 'WD', 'SA', 'SD']
+            random.shuffle(alt_moves)
+            for move in alt_moves:
                 if not self.is_path_blocked(player_pos, move, walls):
                     movement = move
                     break
             else:
-                # if no movement is available, we still try to go in the best direction
-                # because it's better than doing nothing
-                movement = move_horizontal + move_vertical
+                movement = move_horizontal + move_vertical  # absolute fallback
 
         current_time = time.time()
         if movement != self.last_movement:
@@ -487,27 +522,41 @@ class Play(Movement):
 
     def main(self, frame, brawler):
         current_time = time.time()
-        data = self.get_main_data(frame)
+        # frame stays as PIL for crop operations (gadget/super/hypercharge checks)
+        # We only convert to numpy for detection
+        import numpy as np, cv2 as _cv2
+        if hasattr(frame, 'tobytes'):
+            frame_np = _cv2.cvtColor(np.array(frame), _cv2.COLOR_RGB2BGR)
+        else:
+            frame_np = frame
+        data = self.get_main_data(frame_np)
+
+        # Submit numpy frame to background tile thread — never blocks main loop
         if self.should_detect_walls and current_time - self.time_since_walls_checked > self.walls_treshold:
-
-            tile_data = self.get_tile_data(frame)
-
-            walls = self.process_tile_data(tile_data)
-
+            self._submit_tile(frame_np)
             self.time_since_walls_checked = current_time
-            self.last_walls_data = walls
-            data['wall'] = walls
-        elif self.keep_walls_in_memory:
-            data['wall'] = self.last_walls_data
+
+        # Always use latest walls from background thread
+        data['wall'] = self.last_walls_data if self.last_walls_data else []
 
 
         data = self.validate_game_data(data)
         self.track_no_detections(data)
+        overlay.push(data if data else {}, walls=data.get('wall', []) if data else [])
         if data:
             self.time_since_player_last_found = time.time()
         if not data:
+            # Anti-idle: keep moving even without detection to avoid kick
             if current_time - self.time_since_player_last_found > 1.0:
-                self.window_controller.keys_up(list("wasd"))
+                if not hasattr(self, '_anti_idle_time'):
+                    self._anti_idle_time = current_time
+                    self._anti_idle_move = 'W'
+                if current_time - self._anti_idle_time > 4.0:
+                    # Cycle through random directions every 4s
+                    moves = ['W', 'D', 'S', 'A', 'WD', 'WA', 'SD', 'SA']
+                    self._anti_idle_move = random.choice(moves)
+                    self._anti_idle_time = current_time
+                self.do_movement(self._anti_idle_move)
             self.time_since_different_movement = time.time()
             if current_time - self.time_since_last_proceeding > self.no_detection_proceed_delay:
                 current_state = get_state(frame)
