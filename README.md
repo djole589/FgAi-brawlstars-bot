@@ -1,6 +1,6 @@
-# PylaAI
+# FgAi
 
-PylaAI is currently the best external Brawl Stars bot.
+FgAi is currently the best external Brawl Stars bot.
 This repository is intended for devs and it's recommended for others to use the official version from the discord.
 
 **Warning :** This is the source-code, which is meant for developpers or people that know how to install python libraries and run python scripts --> The official build is linked in the discord, which is the source-code converted into an exe so you don't need additional knowledge to run the bot. (You will have to go through a linkvertise link)
@@ -27,8 +27,5 @@ Devs :
 # Run tests
 Run `python -m unittest discover` to check if your changes have made any regressions. 
 
-# If you want to contribute, don't hesitate to create an Issue, a Pull Request, or/and make a ticket on the Pyla discord server at :
-https://discord.gg/xUusk3fw4A
 
-Don't know what to do ? Check the To-Fix and Idea lists :
-https://trello.com/b/SAz9J6AA/public-pyla-trello
+
