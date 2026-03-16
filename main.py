@@ -14,9 +14,9 @@ from utils import load_toml_as_dict, current_wall_model_is_latest, api_base_url,
 from utils import get_brawler_list, update_missing_brawlers_info, check_version, async_notify_user, \
     update_wall_model_classes, get_latest_wall_model_file, get_latest_version, cprint
 from window_controller import WindowController
+import overlay
 
 pyla_version = load_toml_as_dict("./cfg/general_config.toml")['pyla_version']
-
 debug = load_toml_as_dict("cfg/general_config.toml")['super_debug'] == "yes"
 
 
@@ -48,6 +48,11 @@ def pyla_main(data):
             self.cooldown_start_time = 0
             self.cooldown_duration = 3 * 60
 
+            # ── Start FgAi ESP overlay ─────────────────────────────────────
+            overlay.start()
+            cprint("FgAi ESP Overlay started — press F2 to toggle visibility", "#FF7A00")
+            # ──────────────────────────────────────────────────────────────
+
         def initialize_stage_manager(self):
             self.Stage_manager.Trophy_observer.win_streak = data[0]['win_streak']
             self.Stage_manager.Trophy_observer.current_trophies = data[0]['trophies']
@@ -58,7 +63,6 @@ def pyla_main(data):
             folder_path = "./models/"
             model_names = ['mainInGameModel.onnx', 'tileDetector.onnx']
             loaded_models = []
-
             for name in model_names:
                 loaded_models.append(folder_path + name)
             return loaded_models
@@ -93,10 +97,11 @@ def pyla_main(data):
                         self.restart_brawl_stars()
 
             if self.Time_management.idle_check():
-                #print("check for idle!")
-                self.lobby_automator.check_for_idle(frame)
+                # Only check idle in lobby — NEVER interrupt during match!
+                if self.state != "match":
+                    self.lobby_automator.check_for_idle(frame)
 
-        def main(self): #this is for timer to stop after time
+        def main(self):
             s_time = time.time()
             c = 0
             while True:
@@ -106,7 +111,7 @@ def pyla_main(data):
                     elapsed_time = (time.time() - self.start_time) / 60
                     if elapsed_time >= self.run_for_minutes:
                         cprint(f"timer is done, {self.run_for_minutes} is over. continuing for 3 minutes if in game", "#AAE5A4")
-                        self.in_cooldown = True # tries to finish game if in game
+                        self.in_cooldown = True
                         self.cooldown_start_time = time.time()
                         self.Stage_manager.states['lobby'] = lambda data: 0
 
@@ -127,12 +132,28 @@ def pyla_main(data):
                 _, last_ft = self.window_controller.get_latest_frame()
                 if last_ft > 0 and (time.time() - last_ft) > self.window_controller.FRAME_STALE_TIMEOUT:
                     self.Play.window_controller.keys_up(list("wasd"))
-                    print("Stale frame detected -- pausing actions until feed resumes")
-                    time.sleep(1)
+                    cprint("Stale frame -- reconnecting scrcpy...", "#FF7A00")
+                    reconnected = False
+                    for attempt in range(5):
+                        try:
+                            self.window_controller.scrcpy_client.stop()
+                            time.sleep(1.5)
+                            self.window_controller.scrcpy_client.start(threaded=True)
+                            time.sleep(2.5)
+                            _, new_ft = self.window_controller.get_latest_frame()
+                            if new_ft > last_ft:
+                                cprint(f"Reconnected on attempt {attempt+1}!", "#00E676")
+                                reconnected = True
+                                break
+                        except Exception as e:
+                            cprint(f"Reconnect attempt {attempt+1} failed: {e}", "#FF3D57")
+                            time.sleep(2)
+                    if not reconnected:
+                        cprint("Could not reconnect after 5 attempts. Check LDPlayer.", "#FF3D57")
+                        time.sleep(5)
                     continue
 
                 self.manage_time_tasks(frame)
-
 
                 brawler = self.Stage_manager.brawlers_pick_data[0]['brawler']
                 self.Play.main(frame, brawler)
@@ -152,13 +173,11 @@ all_brawlers = get_brawler_list()
 update_icons()
 if api_base_url != "localhost":
     update_missing_brawlers_info(all_brawlers)
-
     check_version()
     update_wall_model_classes()
     if not current_wall_model_is_latest():
-        print("New Wall detection model found, downloading... (this might take a few minutes depending on your internet speed)")
+        print("New Wall detection model found, downloading...")
         get_latest_wall_model_file()
 
-# Use the smaller ratio to maintain aspect ratio
 app = App(login, SelectBrawler, pyla_main, all_brawlers, Hub)
 app.start(pyla_version, get_latest_version)
