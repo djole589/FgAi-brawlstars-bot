@@ -4,292 +4,426 @@ from math import ceil
 
 import customtkinter as ctk
 import pyautogui
-from PIL import Image
+from PIL import Image, ImageDraw
 from customtkinter import CTkImage
 from utils import load_toml_as_dict, update_toml_file, save_brawler_icon, get_dpi_scale
 from tkinter import filedialog
 
 debug = load_toml_as_dict("cfg/general_config.toml")['super_debug'] == "yes"
-orig_screen_width, orig_screen_height = 1920, 1080
-width, height = pyautogui.size()
-width_ratio = width / orig_screen_width
-height_ratio = height / orig_screen_height
-scale_factor = min(width_ratio, height_ratio)
-scale_factor *= 96/get_dpi_scale()
-pyla_version = load_toml_as_dict("./cfg/general_config.toml")['pyla_version']
+orig_w, orig_h = 1920, 1080
+sw, sh = pyautogui.size()
+scale_factor = min(sw / orig_w, sh / orig_h) * (96 / get_dpi_scale())
+ver = load_toml_as_dict("./cfg/general_config.toml")['pyla_version']
+
+def S(v): return int(v * scale_factor)
+
+# ── Palette ───────────────────────────────────────────────────────────────────
+BG      = "#0A0A10"
+SURF    = "#10101A"
+CARD    = "#14141F"
+CARD_HOV = "#1C1C2C"
+CARD_S  = "#1A1A2E"   # selected
+BORDER  = "#222236"
+BORD_H  = "#FF6B00"
+ACC     = "#FF6B00"
+ACC2    = "#E05500"
+TEXT    = "#EEEEF5"
+SUB     = "#666688"
+GREEN   = "#00FF88"
+RED     = "#FF3355"
+INP     = "#0C0C18"
+STRIPE  = "#FF6B00"
+
+COLS     = 10
+ICON_SZ  = S(64)
+CARD_W   = ICON_SZ + S(14)
+CARD_HEIGHT  = ICON_SZ + S(20)
+GAP      = S(4)
+
 
 class SelectBrawler:
 
     def __init__(self, data_setter, brawlers):
-        self.app = ctk.CTk()
+        ctk.set_appearance_mode("dark")
 
-        square_size = int(75 * scale_factor)
-        amount_of_rows = ceil(len(brawlers)/10) + 1
-        necessary_height = (int(145 * scale_factor) + amount_of_rows*square_size + (amount_of_rows-1)*int(3 * scale_factor))
-        self.app.title(f"PylaAI v{pyla_version}")
-        self.brawlers = brawlers
+        self.brawlers      = brawlers
+        self.data_setter   = data_setter
+        self.images        = []
+        self.queue         = []     # list of configured brawler dicts
+        self._sel          = set()  # selected brawler names
+        self.farm_type     = "trophies"
 
-        self.app.geometry(f"{str(int(860 * scale_factor))}x{necessary_height}+{str(int(600 * scale_factor))}")
-        self.data_setter = data_setter
-        self.colors = {
-            'gray': "#7d7777",
-            'red': "#cd5c5c",
-            'darker_white': '#c4c4c4',
-            'dark gray': '#1c1c1c',
-            'cherry red': '#960a00',
-            'ui box gray': '#242424',
-            'chess white': '#f0d9b5',
-            'chess brown': '#b58863',
-            'indian red': "#cd5c5c"
-        }
-
-        self.app.configure(fg_color=self.colors['ui box gray'])
-
-
-
-        self.images = []
-        self.brawlers_data = []
-        self.farm_type = ""
-
-        for brawler in self.brawlers:
-            img_path = f"./api/assets/brawler_icons/{brawler}.png"
+        # ── Load icons ────────────────────────────────────────────────────────
+        for b in brawlers:
+            p = f"./api/assets/brawler_icons/{b}.png"
             try:
-                img = Image.open(img_path)
+                img = Image.open(p)
             except FileNotFoundError:
-                save_brawler_icon(brawler)
-                img = Image.open(img_path)
+                save_brawler_icon(b)
+                img = Image.open(p)
+            self.images.append((b, CTkImage(img, size=(ICON_SZ, ICON_SZ))))
 
-            img_tk = CTkImage(img, size=(square_size, square_size))
-            self.images.append((brawler, img_tk))  # Store tuple of brawler name and image
+        # ── Window ────────────────────────────────────────────────────────────
+        n_rows  = ceil(len(brawlers) / COLS)
+        grid_w  = COLS * CARD_W + (COLS + 1) * GAP
+        win_w   = max(grid_w + S(32), S(900))
+        grid_h  = n_rows * CARD_HEIGHT + (n_rows + 1) * GAP
+        win_h   = S(88) + S(48) + grid_h + S(48) + S(24)
 
-        # Entry widget for filtering
-        self.filter_var = tk.StringVar()
-        self.filter_entry = ctk.CTkEntry(
-            self.app, textvariable=self.filter_var,
-            placeholder_text="Type brawler name...", font=("", int(20 * scale_factor)), width=int(200 * scale_factor),
-            fg_color=self.colors['ui box gray'], border_color=self.colors['cherry red'], text_color="white"
-        )
-        ctk.CTkLabel(self.app, text="Write brawler", font=("Comic sans MS", int(20 * scale_factor)),
-                     text_color=self.colors['cherry red']).place(x=int(scale_factor * 373), y=int(scale_factor * 20))
-        self.filter_entry.place(x=int(340 * scale_factor), y=int(scale_factor * 52))
-        self.filter_var.trace_add("write", lambda *args: self.update_images(self.filter_var.get()))
+        ox = max(0, (sw - win_w) // 2)
+        oy = max(0, (sh - win_h) // 2 - 30)
 
-        # Frame to hold the images
-        self.image_frame = ctk.CTkFrame(self.app, fg_color=self.colors['ui box gray'])
-        self.image_frame.place(x=0, y=int(100 * scale_factor))
+        self.app = ctk.CTk()
+        self.app.configure(fg_color=BG)
+        self.app.title(f"FgAi Bot  v{ver}")
+        self.app.geometry(f"{win_w}x{win_h}+{ox}+{oy}")
+        self.app.resizable(False, False)
 
-        self.update_images("")
-        ctk.CTkButton(self.app, text="Start", command=self.start_bot, fg_color=self.colors['ui box gray'],
-                      text_color="white",
-                      font=("Comic sans MS", int(25 * scale_factor)), border_color=self.colors['cherry red'],
-                      border_width=int(2 * scale_factor)).place(x=int(390 * scale_factor), y=int((necessary_height-60* scale_factor) ))
-
-        ctk.CTkButton(self.app, text="Load Brawler Config", command=self.load_brawler_config, fg_color=self.colors['ui box gray'],
-                      text_color="white",
-                      font=("Comic sans MS", int(25 * scale_factor)), border_color=self.colors['cherry red'],
-                      border_width=int(2 * scale_factor)).place(x=int(10 * scale_factor),
-                                                                y=int((necessary_height-60* scale_factor) ))
-
-        self.timer_var = tk.StringVar()
-        self.timer_entry = ctk.CTkEntry(
-            self.app, textvariable=self.timer_var,
-            placeholder_text="Enter an amount of minutes", font=("", int(20 * scale_factor)), width=int(80 * scale_factor),
-            fg_color=self.colors['ui box gray'], border_color=self.colors['cherry red'], text_color="white"
-        )
-        ctk.CTkLabel(self.app, text="Run for :", font=("Comic sans MS", int(22 * scale_factor)),
-                     text_color="white").place(x=int(scale_factor * 580), y=int((necessary_height-55* scale_factor) ))
-        self.timer_entry.place(x=int(scale_factor * 675), y=int((necessary_height-55* scale_factor) ))
-        self.timer_var.set(load_toml_as_dict("cfg/general_config.toml")["run_for_minutes"])
-        self.timer_var.trace_add("write", lambda *args: self.update_timer(self.timer_var.get()))
-        ctk.CTkLabel(self.app, text="minutes", font=("Comic sans MS", int(22 * scale_factor)),
-                     text_color="white").place(x=int(scale_factor * 760), y=int((necessary_height-55* scale_factor) ))
-
+        self._build(win_w, win_h)
         self.app.mainloop()
 
-    def set_farm_type(self, value):
-        self.farm_type = value
+    # ─────────────────────────────────────────────────────────────────────────
+    def _build(self, win_w, win_h):
 
-    def start_bot(self):
-        self.data_setter(self.brawlers_data)
-        self.app.destroy()
+        # Orange top stripe
+        tk.Frame(self.app, bg=STRIPE, height=S(3)).pack(fill="x")
 
-    def load_brawler_config(self):
-        # open file select dialog to select a json file
-        file_path = filedialog.askopenfilename(
-            title="Select Brawler Config File",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-        if file_path:
-            try:
-                with open(file_path, 'r') as file:
-                    brawlers_data = json.load(file)
-                    try:
-                        brawlers_data = [
-                            bd for bd in brawlers_data
-                            if not (bd["push_until"] <= bd[bd["type"]])
-                        ]
-                        self.brawlers_data = brawlers_data
-                        print("Brawler data loaded successfully :", brawlers_data)
-                    except Exception as e:
-                        print("Invalid data format. Expected a list of brawler data.", e)
-            except Exception as e:
-                print(f"Error loading brawler data: {e}")
+        # ── Header ────────────────────────────────────────────────────────────
+        hdr = ctk.CTkFrame(self.app, fg_color=SURF, height=S(85), corner_radius=0)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
 
-    def on_image_click(self, brawler):
-        self.open_brawler_entry(brawler)
+        # Left: logo
+        logo = ctk.CTkFrame(hdr, fg_color="transparent")
+        logo.place(x=S(22), rely=0.5, anchor="w")
 
-    def open_brawler_entry(self, brawler):
+        ctk.CTkLabel(logo, text="Fg", font=("Impact", S(36)),
+                     text_color=ACC).pack(side="left")
+        ctk.CTkLabel(logo, text="Ai", font=("Impact", S(36)),
+                     text_color=TEXT).pack(side="left")
+        ctk.CTkLabel(logo, text="  BRAWLSTARS BOT",
+                     font=("Segoe UI", S(12), "bold"),
+                     text_color=SUB).pack(side="left", pady=(S(14), 0))
+
+        # Right: queue badge
+        self._q_var = tk.StringVar(value="0 queued")
+        q_frame = ctk.CTkFrame(hdr,
+                               fg_color=CARD, corner_radius=S(8),
+                               border_color=BORDER, border_width=1)
+        q_frame.place(relx=1.0, x=-S(22), rely=0.5, anchor="e")
+
+        ctk.CTkLabel(q_frame, text="QUEUE",
+                     font=("Segoe UI", S(9), "bold"),
+                     text_color=SUB).pack(padx=S(14), pady=(S(6), 0))
+        ctk.CTkLabel(q_frame, textvariable=self._q_var,
+                     font=("Impact", S(22)),
+                     text_color=ACC).pack(padx=S(14), pady=(0, S(6)))
+
+        # ── Toolbar ───────────────────────────────────────────────────────────
+        tb = ctk.CTkFrame(self.app, fg_color=CARD, height=S(46), corner_radius=0)
+        tb.pack(fill="x")
+        tb.pack_propagate(False)
+
+        # Search
+        self.fv = tk.StringVar()
+        ctk.CTkEntry(tb, textvariable=self.fv,
+                     placeholder_text="🔍  Search brawler...",
+                     font=("Segoe UI", S(12)),
+                     width=S(190), height=S(30),
+                     fg_color=INP, border_color=BORDER, border_width=1,
+                     text_color=TEXT, corner_radius=S(6)
+                     ).pack(side="left", padx=(S(12), S(8)), pady=S(8))
+        self.fv.trace_add("write", lambda *_: self._redraw(self.fv.get()))
+
+        # Divider
+        tk.Frame(tb, bg=BORDER, width=1).pack(side="left", fill="y",
+                                               padx=S(4), pady=S(8))
+
+        # Timer
+        ctk.CTkLabel(tb, text="Run", font=("Segoe UI", S(11)),
+                     text_color=SUB).pack(side="left", padx=(S(8), S(4)))
+        self.tv = tk.StringVar(value=str(
+            load_toml_as_dict("cfg/general_config.toml")["run_for_minutes"]))
+        ctk.CTkEntry(tb, textvariable=self.tv,
+                     placeholder_text="∞",
+                     font=("Consolas", S(12)),
+                     width=S(52), height=S(30),
+                     fg_color=INP, border_color=BORDER, border_width=1,
+                     text_color=ACC, corner_radius=S(6), justify="center"
+                     ).pack(side="left")
+        ctk.CTkLabel(tb, text=" min",
+                     font=("Segoe UI", S(11)), text_color=SUB).pack(side="left")
+        self.tv.trace_add("write", lambda *_: self._save_timer())
+
+        # Load config
+        ctk.CTkButton(tb, text="📂  Config",
+                      command=self._load_cfg,
+                      fg_color=CARD_HOV, hover_color=SURF,
+                      border_color=BORDER, border_width=1,
+                      text_color=TEXT, font=("Segoe UI", S(11), "bold"),
+                      corner_radius=S(6), width=S(100), height=S(30)
+                      ).pack(side="left", padx=S(10))
+
+        # START (right)
+        ctk.CTkButton(tb, text="▶  START",
+                      command=self._start,
+                      fg_color=ACC, hover_color=ACC2,
+                      text_color="#fff",
+                      font=("Segoe UI Black", S(12), "bold"),
+                      corner_radius=S(6), width=S(110), height=S(32)
+                      ).pack(side="right", padx=S(12), pady=S(7))
+
+        # Clear queue
+        ctk.CTkButton(tb, text="✖  Clear",
+                      command=self._clear_queue,
+                      fg_color="transparent", hover_color=CARD_HOV,
+                      border_color=BORDER, border_width=1,
+                      text_color=RED, font=("Segoe UI", S(10), "bold"),
+                      corner_radius=S(6), width=S(72), height=S(28)
+                      ).pack(side="right", padx=(0, S(4)))
+
+        # ── Grid ──────────────────────────────────────────────────────────────
+        self._scroll = ctk.CTkScrollableFrame(
+            self.app, fg_color=BG,
+            scrollbar_button_color=BORDER,
+            scrollbar_button_hover_color=ACC,
+            corner_radius=0)
+        self._scroll.pack(fill="both", expand=True,
+                          padx=S(12), pady=(S(6), S(2)))
+
+        self._grid = ctk.CTkFrame(self._scroll, fg_color="transparent")
+        self._grid.pack(anchor="nw")
+        self._redraw("")
+
+        # ── Status bar ────────────────────────────────────────────────────────
+        sb = ctk.CTkFrame(self.app, fg_color=SURF, height=S(22), corner_radius=0)
+        sb.pack(fill="x", side="bottom")
+        sb.pack_propagate(False)
+        self._sv = tk.StringVar(value="Click a brawler to configure it")
+        ctk.CTkLabel(sb, textvariable=self._sv,
+                     font=("Segoe UI", S(9)), text_color=SUB
+                     ).pack(side="left", padx=S(10))
+
+    # ── Grid render ───────────────────────────────────────────────────────────
+    def _redraw(self, flt=""):
+        for w in self._grid.winfo_children():
+            w.destroy()
+
+        row = col = 0
+        for brawler, img in self.images:
+            if flt and not brawler.lower().startswith(flt.lower()):
+                continue
+
+            sel = brawler in self._sel
+            card = ctk.CTkFrame(
+                self._grid,
+                fg_color=CARD_S if sel else CARD,
+                border_color=ACC if sel else BORDER,
+                border_width=S(1) if sel else 1,
+                corner_radius=S(7),
+                width=CARD_W, height=CARD_HEIGHT)
+            card.grid(row=row, column=col, padx=GAP//2, pady=GAP//2)
+            card.grid_propagate(False)
+
+            il = ctk.CTkLabel(card, image=img, text="", cursor="hand2")
+            il.place(relx=0.5, rely=0.42, anchor="center")
+
+            nl = ctk.CTkLabel(card, text=brawler[:9],
+                              font=("Segoe UI", S(7)),
+                              text_color=ACC if sel else SUB)
+            nl.place(relx=0.5, rely=0.90, anchor="center")
+
+            # Tiny checkmark if selected
+            if sel:
+                ctk.CTkLabel(card, text="✔",
+                             font=("Segoe UI", S(8), "bold"),
+                             text_color=GREEN,
+                             fg_color=CARD_S
+                             ).place(relx=0.88, rely=0.08, anchor="center")
+
+            def _e(e, c=card, b=brawler):
+                if b not in self._sel:
+                    c.configure(fg_color=CARD_HOV, border_color=BORD_H)
+
+            def _l(e, c=card, b=brawler):
+                if b not in self._sel:
+                    c.configure(fg_color=CARD, border_color=BORDER)
+
+            def _c(e, b=brawler):
+                self._open(b)
+
+            for w in [card, il, nl]:
+                w.bind("<Enter>", _e)
+                w.bind("<Leave>", _l)
+                w.bind("<Button-1>", _c)
+
+            col += 1
+            if col >= COLS:
+                col = 0
+                row += 1
+
+    # ── Config popup ─────────────────────────────────────────────────────────
+    def _open(self, brawler):
         top = ctk.CTkToplevel(self.app)
-        top.configure(fg_color=self.colors['ui box gray'])
-        top.geometry(
-            f"{str(int(300 * scale_factor))}x{str(int(450 * scale_factor))}+{str(int(1100 * scale_factor))}+{str(int(200 * scale_factor))}")
-        top.title("Enter Brawler Data")
+        top.configure(fg_color=BG)
+        top.title(f"{brawler}")
+        top.geometry(f"{S(360)}x{S(510)}+{S(300)}+{S(180)}")
+        top.resizable(False, False)
         top.attributes("-topmost", True)
+        top.lift(); top.focus_force()
 
-        push_until_var = tk.StringVar()
-        push_until_entry = ctk.CTkEntry(
-            top, textvariable=push_until_var, fg_color=self.colors['ui box gray'], text_color="white",
-            border_color=self.colors['cherry red'], border_width=int(2 * scale_factor), height=int(28 * scale_factor)
-        )
+        tk.Frame(top, bg=STRIPE, height=S(3)).place(x=0, y=0, relwidth=1)
 
-        trophies_var = tk.StringVar()
-        trophies_entry = ctk.CTkEntry(
-            top, textvariable=trophies_var, fg_color=self.colors['ui box gray'], text_color="white",
-            border_color=self.colors['cherry red'], border_width=int(2 * scale_factor), height=int(28 * scale_factor)
-        )
+        # Header
+        h = ctk.CTkFrame(top, fg_color=SURF, height=S(48), corner_radius=0)
+        h.pack(fill="x")
+        h.pack_propagate(False)
+        ctk.CTkLabel(h, text=f"  ⚙  {brawler.upper()}",
+                     font=("Impact", S(20)),
+                     text_color=ACC).pack(side="left", pady=S(10))
 
-        wins_var = tk.StringVar()
-        wins_entry = ctk.CTkEntry(
-            top, textvariable=wins_var, fg_color=self.colors['ui box gray'], text_color="white",
-            border_color=self.colors['cherry red'], border_width=int(2 * scale_factor), height=int(28 * scale_factor)
-        )
+        body = ctk.CTkFrame(top, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=S(20), pady=S(6))
 
-        current_win_streak_var = tk.StringVar(value="0")  # Set the default value to "0"
-        current_win_streak_entry = ctk.CTkEntry(
-            top, textvariable=current_win_streak_var, fg_color=self.colors['ui box gray'], text_color="white",
-            border_color=self.colors['cherry red'], border_width=int(2 * scale_factor), height=int(28 * scale_factor)
-        )
+        # Farm type
+        ctk.CTkLabel(body, text="FARM TYPE",
+                     font=("Segoe UI", S(9), "bold"),
+                     text_color=SUB, anchor="w").pack(fill="x", pady=(S(6), S(3)))
 
-        auto_pick_var = tk.BooleanVar(value=True)  # Checkbox variable, ticked by default
-        auto_pick_checkbox = ctk.CTkCheckBox(
-            top, text="Bot auto-selects brawler", variable=auto_pick_var,
-            fg_color=self.colors['cherry red'], text_color="white", checkbox_height=int(24 * scale_factor)
-        )
+        tf = ctk.CTkFrame(body, fg_color=CARD, corner_radius=S(7))
+        tf.pack(fill="x")
 
-        def submit_data():
-            push_until_value = push_until_var.get()
-            push_until_value = int(push_until_value) if push_until_value.isdigit() else ""
-            trophies_raw = trophies_var.get()
-            trophies_value = int(trophies_raw) if trophies_raw.isdigit() else 0
-            wins_value = wins_var.get()
-            wins_value = int(wins_value) if wins_value.isdigit() else ""
-            current_win_streak_value = current_win_streak_var.get()
-            if self.farm_type == "trophies" and wins_value == "":
-                wins_value = 0
-            data = {
-                "brawler": brawler,
-                "push_until": push_until_value,
-                "trophies": trophies_value,
-                "wins": wins_value,
-                "type": self.farm_type,
-                "automatically_pick": auto_pick_var.get(),
-                "win_streak": int(current_win_streak_value)
-            }
+        _bt = [None, None]
 
-            if data["type"] == "":
-                if data["trophies"] <= data["wins"]:
-                    data["type"] = "trophies"
-                else:
-                    data["type"] = "wins"
+        def _ft(t):
+            self.farm_type = t
+            _bt[0].configure(
+                fg_color=ACC if t == "trophies" else "transparent",
+                text_color="#fff" if t == "trophies" else SUB)
+            _bt[1].configure(
+                fg_color=ACC if t == "wins" else "transparent",
+                text_color="#fff" if t == "wins" else SUB)
 
-            self.brawlers_data = [item for item in self.brawlers_data if item["brawler"] != data["brawler"]]
-            self.brawlers_data.append(data)
+        _bt[0] = ctk.CTkButton(tf, text="🏆 Trophies",
+                                command=lambda: _ft("trophies"),
+                                fg_color=ACC if self.farm_type == "trophies" else "transparent",
+                                hover_color=ACC2,
+                                text_color="#fff" if self.farm_type == "trophies" else SUB,
+                                font=("Segoe UI", S(11), "bold"),
+                                corner_radius=S(6), width=S(148), height=S(32))
+        _bt[0].pack(side="left", padx=S(3), pady=S(3))
 
-            if debug: print("Selected Brawler Data :", self.brawlers_data)
+        _bt[1] = ctk.CTkButton(tf, text="🥊 Wins",
+                                command=lambda: _ft("wins"),
+                                fg_color=ACC if self.farm_type == "wins" else "transparent",
+                                hover_color=ACC2,
+                                text_color="#fff" if self.farm_type == "wins" else SUB,
+                                font=("Segoe UI", S(11), "bold"),
+                                corner_radius=S(6), width=S(148), height=S(32))
+        _bt[1].pack(side="left", padx=S(3), pady=S(3))
+
+        def _inp(lbl, ph, var):
+            ctk.CTkLabel(body, text=lbl,
+                         font=("Segoe UI", S(9), "bold"),
+                         text_color=SUB, anchor="w"
+                         ).pack(fill="x", pady=(S(8), S(2)))
+            ctk.CTkEntry(body, textvariable=var,
+                         placeholder_text=ph,
+                         font=("Consolas", S(12)),
+                         fg_color=INP, border_color=BORDER, border_width=1,
+                         text_color=TEXT, corner_radius=S(6), height=S(33)
+                         ).pack(fill="x")
+
+        pv = tk.StringVar(); tv2 = tk.StringVar()
+        wv = tk.StringVar(); sv  = tk.StringVar(value="0")
+        av = tk.BooleanVar(value=True)
+
+        _inp("TARGET AMOUNT",    "e.g. 500",  pv)
+        _inp("CURRENT TROPHIES", "e.g. 300",  tv2)
+        _inp("CURRENT WINS",     "e.g. 0",    wv)
+        _inp("WIN STREAK",       "0",         sv)
+
+        ctk.CTkCheckBox(body, text="Auto-select brawler",
+                        variable=av,
+                        font=("Segoe UI", S(11)),
+                        text_color=TEXT, fg_color=ACC,
+                        hover_color=ACC2, border_color=BORDER,
+                        checkmark_color="#fff", corner_radius=S(3)
+                        ).pack(anchor="w", pady=(S(10), S(3)))
+
+        tk.Frame(top, bg=BORDER, height=1).pack(fill="x", padx=S(20), pady=(S(3), 0))
+
+        def _add():
+            pu = pv.get().strip();  pu = int(pu) if pu.isdigit() else ""
+            tr = tv2.get().strip(); tr = int(tr) if tr.isdigit() else 0
+            wi = wv.get().strip();  wi = int(wi) if wi.isdigit() else ""
+            sk = sv.get().strip();  sk = int(sk) if sk.isdigit() else 0
+            if self.farm_type == "trophies" and wi == "": wi = 0
+            d = {"brawler": brawler, "push_until": pu,
+                 "trophies": tr, "wins": wi,
+                 "type": self.farm_type or "trophies",
+                 "automatically_pick": av.get(), "win_streak": sk}
+            self.queue = [x for x in self.queue if x["brawler"] != brawler]
+            self.queue.append(d)
+            self._sel.add(brawler)
+            self._q_var.set(f"{len(self.queue)} queued")
+            self._sv.set(f"✔  {brawler} added  •  {len(self.queue)} total")
+            self._redraw(self.fv.get())
+            if debug: print("Queue:", self.queue)
             top.destroy()
 
-        submit_button = ctk.CTkButton(
-            top, text="Submit", command=submit_data, fg_color=self.colors['ui box gray'],
-            border_color=self.colors['cherry red'],
-            text_color="white", border_width=int(2 * scale_factor), width=int(80 * scale_factor)
-        )
+        ctk.CTkButton(top, text="✔  ADD TO QUEUE",
+                      command=_add,
+                      fg_color=ACC, hover_color=ACC2,
+                      text_color="#fff",
+                      font=("Segoe UI Black", S(12), "bold"),
+                      corner_radius=S(7), height=S(40)
+                      ).pack(fill="x", padx=S(20), pady=S(10))
 
-        farm_type_button_frame = ctk.CTkFrame(top, width=int(210 * scale_factor), height=int(50 * scale_factor),
-                                              fg_color=self.colors['ui box gray'])
+    # ── Actions ───────────────────────────────────────────────────────────────
+    def _start(self):
+        if not self.queue:
+            self._sv.set("⚠  Add at least one brawler first!")
+            return
+        self.data_setter(self.queue)
+        self.app.destroy()
 
-        self.wins_button = ctk.CTkButton(farm_type_button_frame, text="Win Amount", width=int(90 * scale_factor),
-                                            command=lambda: self.set_farm_type_color("wins"),
-                                            hover_color=self.colors['cherry red'],
-                                            font=("", int(15 * scale_factor)),
-                                            fg_color=self.colors["ui box gray"],
-                                            border_color=self.colors['cherry red'],
-                                            border_width=int(2 * scale_factor)
-                                            )
-        self.trophies_button = ctk.CTkButton(farm_type_button_frame, text="Trophies", width=int(85 * scale_factor),
-                                             command=lambda: self.set_farm_type_color("trophies"),
-                                             hover_color=self.colors['cherry red'],
-                                             font=("", int(15 * scale_factor)),
-                                             fg_color=self.colors["ui box gray"],
-                                             border_color=self.colors['cherry red'], border_width=int(2 * scale_factor)
-                                             )
+    def _clear_queue(self):
+        self.queue.clear()
+        self._sel.clear()
+        self._q_var.set("0 queued")
+        self._sv.set("Queue cleared")
+        self._redraw(self.fv.get())
 
-        self.trophies_button.place(x=int(10 * scale_factor))
-        self.wins_button.place(x=int(110 * scale_factor))
-
-        ctk.CTkLabel(top, text=f"Brawler: {brawler}", font=("Comic sans MS", int(20 * scale_factor)),
-                     text_color=self.colors['red']).pack(
-            pady=int(7 * scale_factor))
-        farm_type_button_frame.pack()
-        ctk.CTkLabel(top, text="Target Amount", font=("Comic sans MS", int(15 * scale_factor)),
-                     text_color=self.colors['chess white']).pack()
-        push_until_entry.pack(pady=int(4 * scale_factor))
-        ctk.CTkLabel(top, text="Current Trophies", font=("Comic sans MS", int(15 * scale_factor)),
-                     text_color=self.colors['chess white']).pack()
-        trophies_entry.pack(pady=int(4 * scale_factor))
-        ctk.CTkLabel(top, text="Current Wins", font=("Comic sans MS", int(15 * scale_factor)),
-                     text_color=self.colors['chess white']).pack()
-        wins_entry.pack(pady=int(4 * scale_factor))
-        ctk.CTkLabel(top, text="Current Brawler's Win Streak", font=("Comic sans MS", int(15 * scale_factor)),
-                     text_color=self.colors['chess white']).pack()
-        current_win_streak_entry.pack(pady=int(4 * scale_factor))
-        auto_pick_checkbox.pack(pady=int(4 * scale_factor))  # Add the checkbox to the UI
-        submit_button.pack(pady=int(7 * scale_factor))
-
-    def set_farm_type_color(self, value):
-        self.farm_type = value
-        if value == "wins":
-            self.wins_button.configure(fg_color=self.colors['cherry red'])
-            self.trophies_button.configure(fg_color=self.colors['ui box gray'])
-        else:
-            self.wins_button.configure(fg_color=self.colors['ui box gray'])
-            self.trophies_button.configure(fg_color=self.colors['cherry red'])
-
-    def update_images(self, filter_text):
-        for widget in self.image_frame.winfo_children():
-            widget.destroy()
-
-        row_num = 0
-        col_num = 0
-
-        for brawler, img_tk in self.images:
-            if brawler.startswith(filter_text.lower()):
-                label = ctk.CTkLabel(self.image_frame, image=img_tk, text="")
-                label.bind("<Button-1>", lambda e, b=brawler: self.on_image_click(b))  # Bind click event
-                label.grid(row=row_num, column=col_num, padx=int(5 * scale_factor), pady=int(3 * scale_factor))
-
-                col_num += 1
-                if col_num == 10:  # Move to the next row after 10 columns
-                    col_num = 0
-                    row_num += 1
-
-    def update_timer(self, value):
+    def _load_cfg(self):
+        path = filedialog.askopenfilename(
+            title="Load Brawler Config",
+            filetypes=[("JSON", "*.json"), ("All", "*.*")])
+        if not path:
+            return
         try:
-            minutes = int(value)
-            config = load_toml_as_dict("cfg/general_config.toml")
-            config['run_for_minutes'] = minutes
-            update_toml_file("cfg/general_config.toml", config)
-        except ValueError:
-            pass  # Ignore invalid input
+            with open(path) as f:
+                data = json.load(f)
+            data = [d for d in data if not (d["push_until"] <= d[d["type"]])]
+            self.queue = data
+            self._sel  = {d["brawler"] for d in data}
+            self._q_var.set(f"{len(data)} queued")
+            self._sv.set(f"✔  Loaded {len(data)} brawler(s)")
+            self._redraw(self.fv.get())
+        except Exception as e:
+            self._sv.set(f"✖  {e}")
 
-def dummy_data_setter(data):
-    print("Data set:", data)
+    def _save_timer(self):
+        try:
+            cfg = load_toml_as_dict("cfg/general_config.toml")
+            cfg["run_for_minutes"] = int(self.tv.get())
+            update_toml_file("cfg/general_config.toml", cfg)
+        except ValueError:
+            pass
+
+    # legacy compat
+    def set_farm_type(self, v): self.farm_type = v
+    def update_timer(self, v): self._save_timer()
+
+
+def dummy_data_setter(d): print("Data:", d)
